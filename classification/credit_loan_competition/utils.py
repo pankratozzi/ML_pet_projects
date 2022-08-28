@@ -394,10 +394,9 @@ def prepare_cp_sec(data: pd.DataFrame,
     # df.fillna(0, inplace=True)
 
     # deal with extreme outliers
-    df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] > 50] = df.loc[df[
-                                                              'AMT_REQ_CREDIT_BUREAU_QRT'] <= 50, 'AMT_REQ_CREDIT_BUREAU_QRT'].max() + 1
-    # df.loc[df['DAYS_ON_LAST_JOB'] > 50000, 'DAYS_ON_LAST_JOB'] = 366
-    df['DAYS_ON_LAST_JOB'] = df['DAYS_ON_LAST_JOB'].replace(365243, np.nan)
+    df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] > 50] = df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] <= 50, 'AMT_REQ_CREDIT_BUREAU_QRT'].max() + 1
+    df.loc[df['DAYS_ON_LAST_JOB'] > 50000, 'DAYS_ON_LAST_JOB'] = 366
+    # df['DAYS_ON_LAST_JOB'] = df['DAYS_ON_LAST_JOB'].replace(365243, np.nan)
     df.loc[df['TOTAL_SALARY'] > 1e+8, 'TOTAL_SALARY'] /= 1000.
 
     # IQR mark
@@ -426,8 +425,8 @@ def prepare_cp_sec(data: pd.DataFrame,
         df["RATIO_ANNUITY_TO_AGE"] = df["AMOUNT_ANNUITY"] / df["AGE"]
         df["RATIO_CREDIT_TO_AGE"] = df["AMOUNT_CREDIT"] / df["AGE"]
         df["RATIO_SALARY_TO_AGE"] = df["TOTAL_SALARY"] / df["AGE"]
-        df["RATIO_AGE_TO_EXPERIENCE"] = df["AGE"] / (df["DAYS_ON_LAST_JOB"] / 365.25)
-        df["RATIO_CAR_TO_EXPERIENCE"] = df["OWN_CAR_AGE"] / df["DAYS_ON_LAST_JOB"]
+        df["RATIO_AGE_TO_EXPERIENCE"] = df["AGE"] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
+        df["RATIO_CAR_TO_EXPERIENCE"] = df["OWN_CAR_AGE"] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
         df["RATIO_CAR_TO_AGE"] = df["OWN_CAR_AGE"] / df["AGE"]
         aggs = {
             "TOTAL_SALARY": ["mean", "max", "min", "count"],
@@ -468,9 +467,9 @@ def prepare_cp_sec(data: pd.DataFrame,
         df['EXT_SCORE_3_ANNUITY'] = df['EXTERNAL_SCORING_RATING_3'] * df['AMOUNT_ANNUITY']
 
         df['SALARY_REGION_POPULATION'] = df['TOTAL_SALARY'] * df['REGION_POPULATION']
-        df['SALARY_JOB'] = df['TOTAL_SALARY'] / df["DAYS_ON_LAST_JOB"]
-        df['CREDIT_JOB'] = df['AMOUNT_CREDIT'] / df["DAYS_ON_LAST_JOB"]
-        df['ANNUITY_JOB'] = df['AMOUNT_ANNUITY'] / df["DAYS_ON_LAST_JOB"]
+        df['SALARY_JOB'] = df['TOTAL_SALARY'] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
+        df['CREDIT_JOB'] = df['AMOUNT_CREDIT'] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
+        df['ANNUITY_JOB'] = df['AMOUNT_ANNUITY'] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
         funcs = ["min", "max", "mean", "nanmedian", "var"]
         for func in funcs:
             df[f"EXT_SCORES_{func}"] = eval("np.{}".format(func))(df[['EXTERNAL_SCORING_RATING_1',
