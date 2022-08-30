@@ -606,7 +606,7 @@ def print_scores(folds_scores, train_scores):
     print("*" * 50)
 
 
-def xgboost_cross_validation(params, X, y, cv, categorical=None, rounds=50, verbose=True):
+def xgboost_cross_validation(params, X, y, cv, categorical=None, rounds=50, verbose=True, return_valid_mean=False):
     estimators, encoders = [], {}
     folds_scores, train_scores = [], []
     oof_preds = np.zeros(X.shape[0])
@@ -650,7 +650,7 @@ def xgboost_cross_validation(params, X, y, cv, categorical=None, rounds=50, verb
         print_scores(folds_scores, train_scores)
         print(f"OOF-score: {roc_auc_score(y, oof_preds):.5f}")
 
-    return estimators, encoders, oof_preds
+    return estimators, encoders, oof_preds, np.mean(folds_scores) if return_valid_mean else estimators, encoders, oof_preds
 
 
 def cross_validation(model, X, y, cv):
@@ -674,4 +674,43 @@ def cross_validation(model, X, y, cv):
         estimators.append(clone(model).fit(x_train, y_train))
 
     print_scores(folds_scores, train_scores)
+    return estimators, oof_preds, np.mean(folds_scores)
+
+
+def lightgbm_cross_validation_mean(params, X, y, cv, categorical=None, rounds=50, verbose=True):
+    estimators, folds_scores, train_scores = [], [], []
+
+    if not categorical:
+        categorical = "auto"
+
+    oof_preds = np.zeros(X.shape[0])
+    if verbose:
+        print(f"{time.ctime()}, Cross-Validation, {X.shape[0]} rows, {X.shape[1]} cols")
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y)):
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        model = LGBMClassifier(**params)
+        model.fit(
+            x_train, y_train,
+            eval_set=[(x_valid, y_valid)],
+            eval_metric="auc",
+            verbose=0,
+            early_stopping_rounds=rounds
+        )
+        oof_preds[valid_idx] = model.predict_proba(x_valid)[:, 1]
+        train_score = model.predict_proba(x_train)[:, 1]
+        train_score = roc_auc_score(y_train, train_score)
+        score = roc_auc_score(y_valid, oof_preds[valid_idx])
+        folds_scores.append(round(score, 5))
+        train_scores.append(round(train_score, 5))
+
+        if verbose:
+            print(f"Fold {fold + 1}, Train score = {train_score:.5f}, Valid score = {score:.5f}")
+        estimators.append(model)
+
+    if verbose:
+        print_scores(folds_scores, train_scores)
+        print(f"OOF-score: {roc_auc_score(y, oof_preds):.5f}")
     return estimators, oof_preds, np.mean(folds_scores)
