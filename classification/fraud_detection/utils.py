@@ -466,6 +466,40 @@ def lightgbm_cross_validation_group(params, X, y, cv, feature_name, categorical=
     return estimators, oof_preds
 
 
+def catboost_cross_validation_group(params, X, y, cv, feature_name, categorical=None, rounds=50):
+    estimators, folds_scores, train_scores = [], [], []
+
+    oof_preds = np.zeros(X.shape[0])
+    print(f"{time.ctime()}, Cross-Validation, {X.shape[0]} rows, {X.shape[1]} cols")
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y, groups=X[feature_name])):
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        model = CatBoostClassifier(**params)
+        x_train.drop(feature_name, axis=1, inplace=True)
+        x_valid.drop(feature_name, axis=1, inplace=True)
+        train_pool = Pool(x_train, y_train, cat_features=categorical)
+        valid_pool = Pool(x_valid, y_valid, cat_features=categorical)
+        model.fit(
+            train_pool,
+            eval_set=valid_pool,
+            early_stopping_rounds=rounds
+        )
+        train_score = catboost.CatBoost.predict(model, train_pool, prediction_type='Probability')[:, 1]
+        train_score = roc_auc_score(y_train, train_score)
+        oof_preds[valid_idx] = catboost.CatBoost.predict(model, valid_pool, prediction_type='Probability')[:, 1]
+        score = roc_auc_score(y_valid, oof_preds[valid_idx])
+        folds_scores.append(round(score, 5))
+        train_scores.append(round(train_score, 5))
+        print(f"Fold {fold + 1}, Train score = {train_score:.5f}, Valid score = {score:.5f}")
+        estimators.append(model)
+
+    print_scores(folds_scores, train_scores)
+    print(f"OOF-score: {roc_auc_score(y, oof_preds):.5f}")
+    return estimators, oof_preds
+
+
 def lightgbm_cross_validation_mean(params, X, y, cv, categorical=None, rounds=50, verbose=True):
     estimators, folds_scores, train_scores = [], [], []
 
@@ -943,3 +977,196 @@ def make_lags(ts, lags, lead_time=1, feature="_"):
             for i in range(lead_time, lags + lead_time)
         },
         axis=1)
+
+
+def catboost_cross_validation_group_proc(params,
+                                         X,
+                                         y,
+                                         cv,
+                                         feature_name,
+                                         preprocess=True,
+                                         rounds=200):
+    estimators, folds_scores, train_scores, preprocessors = [], [], [], []
+
+    oof_preds = np.zeros(X.shape[0])
+    print(f"{time.ctime()}, Cross-Validation, {X.shape[0]} rows, {X.shape[1]} cols")
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y, groups=X[feature_name])):
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        model = CatBoostClassifier(**params)
+        x_train.drop(feature_name, axis=1, inplace=True)
+        x_valid.drop(feature_name, axis=1, inplace=True)
+        if preprocess:
+            preprocessor = Preprocessor()
+            x_train = preprocessor.fit_transform(x_train)
+            x_valid = preprocessor.transform(x_valid)
+            preprocessors.append(preprocessor)
+
+        categorical = [column for column in x_train.columns if x_train[column].dtype in ["object", "category"]]
+        x_train[categorical] = x_train[categorical].astype("str")
+        x_valid[categorical] = x_valid[categorical].astype("str")
+
+        train_pool = Pool(x_train, y_train, cat_features=categorical)
+        valid_pool = Pool(x_valid, y_valid, cat_features=categorical)
+        model.fit(
+            train_pool,
+            eval_set=valid_pool,
+            early_stopping_rounds=rounds
+        )
+        train_score = catboost.CatBoost.predict(model, train_pool, prediction_type='Probability')[:, 1]
+        train_score = roc_auc_score(y_train, train_score)
+        oof_preds[valid_idx] = catboost.CatBoost.predict(model, valid_pool, prediction_type='Probability')[:, 1]
+        score = roc_auc_score(y_valid, oof_preds[valid_idx])
+        folds_scores.append(round(score, 5))
+        train_scores.append(round(train_score, 5))
+        print(f"Fold {fold + 1}, Train score = {train_score:.5f}, Valid score = {score:.5f}")
+        estimators.append(model)
+        gc.collect()
+
+    print_scores(folds_scores, train_scores)
+    print(f"OOF-score: {roc_auc_score(y, oof_preds):.5f}")
+    return estimators, oof_preds, preprocessors
+
+
+class Preprocessor(BaseEstimator, TransformerMixin):
+    def __init__(self, prepare_for_user_split=False):
+        self.constants = []
+        self.cat_freq_features = ["card1", "card2", "card3", "card4", "card5", "card6", "addr1", "addr2"]
+        self.encoder1 = FrequencyEncoder(self.cat_freq_features)
+        self.train_agg_amt_means = {}
+        self.train_agg_amt_stds = {}
+        self.train_agg_amt_means_d15 = {}
+        self.train_agg_amt_stds_d15 = {}
+        self.encoder2 = FrequencyEncoder(["P_emaildomain", "R_emaildomain"])
+        self.pipe = make_pipeline(StandardScaler(), PCA(n_components=None, random_state=seed))
+        self.numerical_columns = []
+        self.aggs = {"TransactionAmt": ["mean", "sum", "count", "min", "max"]}
+        self.trans_agg_train = None
+        self.is_fitted = False
+        self.prepare_for_user_split = prepare_for_user_split
+
+    def fit(self, X, y=None):
+        if not isinstance(X, pd.DataFrame):
+            print(f"Pass returned pandas dataframe with valid columns.")
+            return self
+
+        for column in X.columns:
+            if X[column].nunique() < 2:
+                self.constants.append(column)
+
+        return self
+
+    def transform(self, X):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(data=X, columns=[f"feat_{i + 1}" for i in range(X.shape[1])])
+            print(f"Pass returned pandas dataframe with valid columns.")
+            return X
+        else:
+            X = X.copy(deep=True)
+        X = reduce_memory_df(X)
+        X.drop(self.constants, axis=1, inplace=True)
+
+        X['card_hash'] = X.apply(lambda x: self.card_info_hash(x), axis=1)
+
+        X["TransactionDT"] = pd.Timestamp('2017-12-01') + pd.to_timedelta(X["TransactionDT"], unit='s')
+        X["TransactionYear"] = X["TransactionDT"].dt.year.astype("category")
+        X["TransactionMonth"] = X["TransactionDT"].dt.month.astype("category")
+        X["TransactionDayWeek"] = X["TransactionDT"].dt.dayofweek.astype("category")
+        X["TransactionHour"] = X["TransactionDT"].dt.hour.astype("category")
+        X["TransactionDay"] = X["TransactionDT"].dt.day.astype("category")
+
+        X["card1_2"] = (X["card1"].apply(str) + '_' + X["card2"].apply(str)).astype("category")
+        X["card1_2_3_5"] = (X["card1"].apply(str) + '_' + X["card2"].apply(str) + '_' + X["card3"].apply(str) + '_' + X[
+            "card5"].apply(str))
+        X["card_addr"] = (X["card1_2_3_5"] + '_' + X["addr1"].apply(str) + '_' + X["addr2"].apply(str)).astype(
+            "category")
+        X["card1_2_3_5"] = X["card1_2_3_5"].astype("category")
+
+        if not self.is_fitted:
+            X = self.encoder1.fit_transform(X)
+
+            for feature in self.cat_freq_features:
+                self.train_agg_amt_means[feature] = X.groupby(feature)["TransactionAmt"].mean()
+                self.train_agg_amt_stds[feature] = X.groupby(feature)["TransactionAmt"].std()
+                self.train_agg_amt_means_d15[feature] = X.groupby(feature)["D15"].mean()
+                self.train_agg_amt_stds_d15[feature] = X.groupby(feature)["D15"].std()
+        else:
+            X = self.encoder1.transform(X)
+
+        for feature in self.cat_freq_features:
+            X[f"AMT_BY_{feature}_mean"] = X["TransactionAmt"] / X[feature].map(
+                self.train_agg_amt_means.get(feature)).astype(float)
+            X[f"AMT_BY_{feature}_diff"] = X["TransactionAmt"] - X[feature].map(
+                self.train_agg_amt_means.get(feature)).astype(float)
+            X[f"AMT_BY_{feature}_std"] = X["TransactionAmt"] / X[feature].map(
+                self.train_agg_amt_stds.get(feature)).astype(float)
+
+            X[f"D15_BY_{feature}_mean"] = X["D15"] / X[feature].map(self.train_agg_amt_means_d15.get(feature)).astype(
+                float)
+            X[f"D15_BY_{feature}_diff"] = X["D15"] - X[feature].map(self.train_agg_amt_means_d15.get(feature)).astype(
+                float)
+            X[f"D15_BY_{feature}_std"] = X["D15"] / X[feature].map(self.train_agg_amt_stds_d15.get(feature)).astype(
+                float)
+
+        X["INT_TransAmt"] = X["TransactionAmt"] // 1
+        X["FL_TransAmt"] = X["TransactionAmt"] % 1
+        X["TransactionAmt_log"] = np.log(X["TransactionAmt"])
+
+        if not self.is_fitted:
+            self.encoder2.fit(X)
+
+        X = self.encoder2.transform(X)
+
+        cols_d = [column for column in X.columns[:393] if column.startswith("D")]
+        cols_c = [column for column in X.columns[:393] if column.startswith("C")]
+        cols_v = [column for column in X.columns[:393] if column.startswith("V")]
+
+        X["D_mean"] = X[cols_d].mean(axis=1)
+        X["D_std"] = X[cols_d].std(axis=1)
+
+        X["C_mean"] = X[cols_c].mean(axis=1)
+        X["C_std"] = X[cols_c].std(axis=1)
+
+        X["V_mean"] = X[cols_v].mean(axis=1)
+        X["V_std"] = X[cols_v].std(axis=1)
+
+        try:
+            check_is_fitted(self.pipe)
+        except:
+            self.numerical_columns = [col for col in X.columns[2:] if X[col].dtype not in ["object", "category"]]
+            # if np.any(np.isinf(X[numerical_columns])):
+            #     X[numerical_columns] = X[numerical_columns].replace(np.inf, -1).replace(-np.inf, -1)
+            self.pipe.fit(
+                X[self.numerical_columns].fillna(0).replace(np.inf, -1).replace(-np.inf, -1))  # were init num_cols
+
+        pca_features = self.pipe.transform(X[self.numerical_columns].fillna(0).replace(np.inf, -1).replace(-np.inf, -1))
+        pca_features = pd.DataFrame(data=pca_features[:, :61], columns=[f"PCA_{i}" for i in range(1, 62)],
+                                    index=X.index)
+        X = pd.concat([X, pca_features], axis=1)
+
+        # apply only train statistics
+        if not self.is_fitted:
+            self.trans_agg_train = create_numerical_aggs(X, groupby_id="card_hash", aggs=self.aggs,
+                                                         suffix="_BY_CARD_HASH")
+            self.is_fitted = True
+        X = pd.merge(X, self.trans_agg_train, on="card_hash", how='left')
+
+        lags = make_lags(X.sort_values("TransactionDT").groupby("card_hash")["TransactionAmt"], lags=5,
+                         feature="TransactionAmt").sort_index()
+        X = pd.merge(X, lags, right_index=True, left_index=True)
+
+        if self.prepare_for_user_split:
+            X.drop(["TransactionDT", "TransactionID"], axis=1, inplace=True)
+        else:
+            X.drop(["TransactionDT", "TransactionID", "card_hash"], axis=1, inplace=True)
+        gc.collect()
+        return X
+
+    @staticmethod
+    def card_info_hash(x):
+        s = (str(x['card1']) + str(x['card2']) + str(x['card3']) + str(x['card4']) + str(x['card5']) + str(x['card6']) +
+             x["ProductCD"])
+        h = hashlib.sha256(s.encode('utf-8')).hexdigest()[0:15]
+        return h
