@@ -816,7 +816,8 @@ def categorical_output(df, target, *columns, alpha=0.05, sample_size=0):
                     print(f'Categories {a} and {b} have different frequencies with target, p-value: {pvalue:.4f}.')
 
 
-def check_duplicates_and_constants(df_train, df_test=None):
+def check_duplicates_and_constants(df_train, df_test=None, threshold=5e-5):
+    low_variance_cols = []
     test_exist = True if df_test is not None else False
     print(f"Initial train shape: {df_train.shape}")
     if test_exist:
@@ -834,11 +835,17 @@ def check_duplicates_and_constants(df_train, df_test=None):
             df_train.drop(column, axis=1, inplace=True)
             if test_exist:
                 df_test.drop(column, axis=1, inplace=True)
+        elif df_train[column].nunique() < 20:
+            freqs = df_train[column].value_counts(dropna=True)
+            freqs /= len(df_train)
+            if freqs.iloc[1] < threshold:
+                low_variance_cols.append(column)
 
     print(f"Final train shape: {df_train.shape}", end=' ')
     if test_exist:
         print(f", test shape: {df_test.shape}.")
-
+    if len(low_variance_cols) > 0:
+        print("Check next columns for usability: ", *low_variance_cols)
     return df_train, df_test if test_exist else df_train
 
 
