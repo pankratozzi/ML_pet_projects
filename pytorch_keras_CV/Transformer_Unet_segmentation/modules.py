@@ -105,7 +105,7 @@ class ViT(nn.Module):
         self.transformer = Encoder(embedding_dim, num_heads, mlp_dim, block_num)
 
         # if self.classification:
-        self.mlp_head = nn.Linear(embedding_dim, num_classes)
+        self.mlp_head = nn.Linear(embedding_dim, num_classes, bias=True)
 
     def forward(self, x):
         img_patches = rearrange(x, 'b c (patch_x x) (patch_y y) -> b (x y) (patch_x patch_y c)', patch_x=self.patch_dim,
@@ -284,6 +284,34 @@ class FocalLoss(nn.modules.loss._WeightedLoss):
         pt = torch.exp(-ce_loss)
         focal_loss = ((1 - pt) ** self.gamma * ce_loss).mean()
         return focal_loss
+
+
+class EarlyStopping:
+    def __init__(self, patience=15, min_delta=0, path='model.pth'):
+        self.path = path
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss, model=None):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif self.best_loss - val_loss > self.min_delta:
+            checkpoint = {
+                'model': model,
+            }
+            torch.save(checkpoint, self.path)
+            print(f'Model saved to: {self.path}')
+            self.best_loss = val_loss
+            self.counter = 0
+        elif self.best_loss - val_loss < self.min_delta:
+            self.counter += 1
+            print(f"INFO: Early stopping counter {self.counter} of {self.patience}")
+            if self.counter >= self.patience:
+                print('INFO: Early stopping')
+                self.early_stop = True
 
 
 if __name__ == "__main__":
