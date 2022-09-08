@@ -258,12 +258,12 @@ class UnetDecoder(nn.Module):
 
 
 class TransUNET(nn.Module):
-    def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim, block_num, patch_dim, num_classes):
+    def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim, block_num, patch_dim, num_classes, num_labels=1):
         super(TransUNET, self).__init__()
 
         self.encoder = UnetEncoder(image_size, in_channels, out_channels, num_heads, mlp_dim,
-                                   block_num, patch_dim, num_classes=num_classes)
-        self.decoder = UnetDecoder(out_channels, num_classes=1)  # num_classes
+                                   block_num, patch_dim, num_classes=num_classes)  # num_classes for inbuilt ViT
+        self.decoder = UnetDecoder(out_channels, num_classes=num_labels)  # num_labels for model out_channel size
 
     def forward(self, x):
         x, x1, x2, x3, x_cls = self.encoder(x)
