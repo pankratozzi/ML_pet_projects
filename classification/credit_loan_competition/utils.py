@@ -11,6 +11,8 @@ import re
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix, f1_score, classification_report, auc, precision_recall_curve
+from sklearn.metrics import roc_curve, roc_auc_score, precision_score, recall_score, accuracy_score, confusion_matrix
 from sklearn.base import clone
 
 from itertools import combinations
@@ -147,7 +149,8 @@ def make_modify_cross_validation(X: pd.DataFrame,
                                  error_to_be_outlier: None,
                                  verbose: bool = True,
                                  proba: bool = True,
-                                 early: bool = False):
+                                 early: bool = False,
+                                 regression: bool = False):
     estimators, fold_train_scores, fold_valid_scores = [], [], []
     oof_predictions = np.zeros(X.shape[0])
 
@@ -174,10 +177,13 @@ def make_modify_cross_validation(X: pd.DataFrame,
         if not error_to_be_outlier:
             fold_valid_scores.append(metric(y_valid, y_valid_pred))
         else:
-            # mask = ((y_valid - y_valid_pred) / y_valid) < error_to_be_outlier  # for regression task: 0.05
-            y_valid_pred = pd.Series(data=y_valid_pred, index=y_valid.index, name='predictions')
-            outliers = iso.predict(x_valid.select_dtypes(include="number"))
-            mask = y_valid[outliers == 1].index
+            if regression:
+                mask = ((y_valid - y_valid_pred) / y_valid) < error_to_be_outlier  # for regression task: 0.05
+            else:
+                # y_valid_pred = pd.Series(data=y_valid_pred, index=y_valid.index, name='predictions')
+                # outliers = iso.predict(x_valid.select_dtypes(include="number"))
+                # mask = y_valid[outliers == 1].index
+                mask = y_valid[np.abs(y_valid - metric(y_valid, y_valid_pred)) < 0.9].index
             fold_valid_scores.append(metric(y_valid.loc[mask], y_valid_pred.loc[mask]))
         oof_predictions[valid_idx] = y_valid_pred
 
@@ -199,10 +205,13 @@ def make_modify_cross_validation(X: pd.DataFrame,
     if not error_to_be_outlier:
         oof_score = metric(y, oof_predictions)
     else:
-        # mask = ((y - oof_predictions) / y) < error_to_be_outlier  # for regression task
-        oof_predictions = pd.Series(data=oof_predictions, index=y.index, name="oof_predictions")
-        outliers = iso.predict(X.select_dtypes(include="number"))
-        mask = y[outliers == 1].index
+        if regression:
+            mask = ((y - oof_predictions) / y) < error_to_be_outlier  # for regression task
+        else:
+            # oof_predictions = pd.Series(data=oof_predictions, index=y.index, name="oof_predictions")
+            # outliers = iso.predict(X.select_dtypes(include="number"))
+            # mask = y[outliers == 1].index
+            mask = y[(np.abs(y - metric(y, oof_predictions))) < 0.9].index
         oof_score = metric(y.loc[mask], oof_predictions.loc[mask])
 
     print(f"CV-results train: {round(np.mean(fold_train_scores), 4)} +/- {round(np.std(fold_train_scores), 3)}")
@@ -394,7 +403,8 @@ def prepare_cp_sec(data: pd.DataFrame,
     # df.fillna(0, inplace=True)
 
     # deal with extreme outliers
-    df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] > 50] = df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] <= 50, 'AMT_REQ_CREDIT_BUREAU_QRT'].max() + 1
+    df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] > 50, 'AMT_REQ_CREDIT_BUREAU_QRT'] =\
+        df.loc[df['AMT_REQ_CREDIT_BUREAU_QRT'] <= 50, 'AMT_REQ_CREDIT_BUREAU_QRT'].max() + 1
     df.loc[df['DAYS_ON_LAST_JOB'] > 50000, 'DAYS_ON_LAST_JOB'] = 366
     # df['DAYS_ON_LAST_JOB'] = df['DAYS_ON_LAST_JOB'].replace(365243, np.nan)
     df.loc[df['TOTAL_SALARY'] > 1e+8, 'TOTAL_SALARY'] /= 1000.
@@ -428,6 +438,11 @@ def prepare_cp_sec(data: pd.DataFrame,
         df["RATIO_AGE_TO_EXPERIENCE"] = df["AGE"] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
         df["RATIO_CAR_TO_EXPERIENCE"] = df["OWN_CAR_AGE"] / (df["DAYS_ON_LAST_JOB"] / 365.25 + 1)
         df["RATIO_CAR_TO_AGE"] = df["OWN_CAR_AGE"] / df["AGE"]
+
+        bki_flags = [flag for flag in df.columns if "AMT_REQ_CREDIT_BUREAU" in flag]
+        df["BKI_REQUESTS_COUNT"] = df[bki_flags].sum(axis=1)
+        df["BKI_KURTOSIS"] = df[bki_flags].kurtosis(axis=1)
+
         aggs = {
             "TOTAL_SALARY": ["mean", "max", "min", "count"],
             "AMOUNT_CREDIT": ["mean", "max", "min", "count"],
@@ -457,6 +472,8 @@ def prepare_cp_sec(data: pd.DataFrame,
 
         df['EXTERNAL_SCORE_WEIGHTED'] = df['EXTERNAL_SCORING_RATING_1'] * 2 + df['EXTERNAL_SCORING_RATING_2'] + df[
             'EXTERNAL_SCORING_RATING_3'] * 3
+        df["EXTERNAL_SCORING_PROD"] = df["EXTERNAL_SCORING_RATING_1"] * df["EXTERNAL_SCORING_RATING_2"] * df[
+            "EXTERNAL_SCORING_RATING_3"]
 
         df['EXT_SCORE_1_AMT_CREDIT'] = df['EXTERNAL_SCORING_RATING_1'] * df['AMOUNT_CREDIT']
         df['EXT_SCORE_2_AMT_CREDIT'] = df['EXTERNAL_SCORING_RATING_2'] * df['AMOUNT_CREDIT']
@@ -515,6 +532,7 @@ class BestSet(BaseEstimator, TransformerMixin):
             dim -= 1
             self.scores_.append(scores[best])
         return self
+
     def transform(self, X):
         best_indices = list(self.subsets_[np.argmax(self.scores_)])
         return X.iloc[:, best_indices]
@@ -530,7 +548,7 @@ class BestSet(BaseEstimator, TransformerMixin):
         return score
 
 
-def lightgbm_cross_validation(params, X, y, cv, categorical=None, rounds=50, verbose=True):
+def lightgbm_cross_validation(params, X, y, cv, categorical=None, rounds=50, verbose=True, sampler=None):
     estimators, folds_scores, train_scores = [], [], []
 
     if not categorical:
@@ -543,6 +561,9 @@ def lightgbm_cross_validation(params, X, y, cv, categorical=None, rounds=50, ver
     for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y)):
         x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
         y_train, y_valid = y[train_idx], y[valid_idx]
+
+        if sampler is not None:
+            x_train, y_train = sampler.fit_resample(x_train.fillna(0), y_train)
 
         model = LGBMClassifier(**params)
         model.fit(
