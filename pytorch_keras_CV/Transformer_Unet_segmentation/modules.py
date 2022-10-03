@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+import numpy as np
 
 
 class MultiHeadAttention(nn.Module):
@@ -87,7 +88,7 @@ class Encoder(nn.Module):
 
 class ViT(nn.Module):
     def __init__(self, img_size, in_channels, embedding_dim, num_heads, mlp_dim,
-                 block_num, patch_dim, classification=True, num_classes=1, dropout=0.1):
+                 block_num, patch_dim, classification=True, num_classes=1, dropout=0.1, cosine=False):
         super(ViT, self).__init__()
 
         self.patch_dim = patch_dim  # 16
@@ -96,7 +97,10 @@ class ViT(nn.Module):
         self.token_dim = in_channels * (patch_dim ** 2)  # 3 * (16^2) = 768
 
         self.projection = nn.Linear(self.token_dim, embedding_dim)
-        self.pos_embedding = nn.Parameter(torch.rand(self.num_tokens + 1, embedding_dim))
+        if cosine:
+            self.pos_embedding = nn.Parameter(data=self._position_encoding(self.num_tokens + 1, embedding_dim))
+        else:
+            self.pos_embedding = nn.Parameter(torch.rand(self.num_tokens + 1, embedding_dim))
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, embedding_dim))
 
@@ -105,7 +109,21 @@ class ViT(nn.Module):
         self.transformer = Encoder(embedding_dim, num_heads, mlp_dim, block_num)
 
         # if self.classification:
-        self.mlp_head = nn.Linear(embedding_dim, num_classes, bias=True)
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, num_classes, bias=True),
+        )
+
+    def _position_encoding(self, n_position, hidden):
+
+        def calculate_angle_vec(position):
+            return [position / np.power(10000, 2 * (hid // 2) / hidden) for hid in range(hidden)]
+
+        position_table = np.array([calculate_angle_vec(pos_ix) for pos_ix in range(n_position)])
+        position_table[:, 0::2] = np.sin(position_table[:, 0::2])
+        position_table[:, 1::2] = np.cos(position_table[:, 1::2])
+
+        return torch.FloatTensor(position_table).unsqueeze(0)
 
     def forward(self, x):
         img_patches = rearrange(x, 'b c (patch_x x) (patch_y y) -> b (x y) (patch_x patch_y c)', patch_x=self.patch_dim,
@@ -199,7 +217,7 @@ class DecoderBottleneck(nn.Module):
 
 class UnetEncoder(nn.Module):
     def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim,
-                 block_num, patch_dim, embedding_dim=512, num_classes=3):
+                 block_num, patch_dim, embedding_dim=512, num_classes=3, cosine=False):
         super(UnetEncoder, self).__init__()
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=7, stride=2, padding=3, bias=False)
@@ -212,7 +230,7 @@ class UnetEncoder(nn.Module):
 
         self.vit_image_size = image_size // patch_dim
         self.vit = ViT(self.vit_image_size, out_channels * 8, out_channels * 8, num_heads, mlp_dim,
-                       block_num, patch_dim=1, classification=False, num_classes=num_classes)
+                       block_num, patch_dim=1, classification=False, num_classes=num_classes, cosine=cosine)
 
         self.conv2 = nn.Conv2d(out_channels * 8, embedding_dim, kernel_size=3, stride=1, padding=1)
         self.norm2 = nn.BatchNorm2d(embedding_dim)
@@ -258,11 +276,12 @@ class UnetDecoder(nn.Module):
 
 
 class TransUNET(nn.Module):
-    def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim, block_num, patch_dim, num_classes, num_labels=1):
+    def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim, block_num, patch_dim, num_classes,
+                 num_labels=1, cosine=False, classify=False):
         super(TransUNET, self).__init__()
 
         self.encoder = UnetEncoder(image_size, in_channels, out_channels, num_heads, mlp_dim,
-                                   block_num, patch_dim, num_classes=num_classes)  # num_classes for inbuilt ViT
+                                   block_num, patch_dim, num_classes=num_classes, cosine=cosine)  # num_classes for inbuilt ViT
         self.decoder = UnetDecoder(out_channels, num_classes=num_labels)  # num_labels for model out_channel size
 
     def forward(self, x):
@@ -270,20 +289,6 @@ class TransUNET(nn.Module):
         x = self.decoder(x, x1, x2, x3)
 
         return x, x_cls
-
-
-class FocalLoss(nn.modules.loss._WeightedLoss):
-    def __init__(self, weight=None, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__(weight, reduction=reduction)
-        self.gamma = gamma
-        self.weight = weight  # weight parameter will act as the alpha parameter to balance class weights
-
-    def forward(self, preds, target):
-
-        ce_loss = F.cross_entropy(preds, target, reduction=self.reduction, weight=self.weight)
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma * ce_loss).mean()
-        return focal_loss
 
 
 class EarlyStopping:
