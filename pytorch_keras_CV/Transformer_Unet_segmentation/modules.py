@@ -86,6 +86,20 @@ class Encoder(nn.Module):
         return x
 
 
+def init_weights(module):
+    if isinstance(module, (nn.Linear, nn.Conv2d)):
+        module.weight.data.normal_(mean=0.0, std=0.02)
+        if module.bias is not None:
+            module.bias.data.zero_()
+    elif isinstance(module, nn.Embedding):
+        module.weight.data.normal_(mean=0.0, std=0.02)
+        if module.padding_idx is not None:
+            module.weight.data[module.padding_idx].zero_()
+    elif isinstance(module, nn.LayerNorm):
+        module.bias.data.zero_()
+        module.weight.data.fill_(1.0)
+
+
 class ViT(nn.Module):
     def __init__(self, img_size, in_channels, embedding_dim, num_heads, mlp_dim,
                  block_num, patch_dim, classification=True, num_classes=1, dropout=0.1, cosine=False):
@@ -100,7 +114,7 @@ class ViT(nn.Module):
         if cosine:
             self.pos_embedding = nn.Parameter(data=self._position_encoding(self.num_tokens + 1, embedding_dim))
         else:
-            self.pos_embedding = nn.Parameter(torch.rand(self.num_tokens + 1, embedding_dim))
+            self.pos_embedding = nn.Parameter(torch.rand(self.num_tokens + 1, embedding_dim))  # init: rand ~N[0, 1), randn ~N[-1,1]
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, embedding_dim))
 
@@ -217,7 +231,7 @@ class DecoderBottleneck(nn.Module):
 
 class UnetEncoder(nn.Module):
     def __init__(self, image_size, in_channels, out_channels, num_heads, mlp_dim,
-                 block_num, patch_dim, embedding_dim=512, num_classes=3, cosine=False):
+                 block_num, patch_dim, embedding_dim=512, num_classes=3, cosine=False, init=False):
         super(UnetEncoder, self).__init__()
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=7, stride=2, padding=3, bias=False)
@@ -231,6 +245,8 @@ class UnetEncoder(nn.Module):
         self.vit_image_size = image_size // patch_dim
         self.vit = ViT(self.vit_image_size, out_channels * 8, out_channels * 8, num_heads, mlp_dim,
                        block_num, patch_dim=1, classification=False, num_classes=num_classes, cosine=cosine)
+        if init:
+            self.vit.apply(init_weights)
 
         self.conv2 = nn.Conv2d(out_channels * 8, embedding_dim, kernel_size=3, stride=1, padding=1)
         self.norm2 = nn.BatchNorm2d(embedding_dim)
