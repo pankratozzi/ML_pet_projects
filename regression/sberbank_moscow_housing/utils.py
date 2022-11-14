@@ -574,6 +574,60 @@ def xgboost_cross_validation(params, X, y, cv, categorical=None, rounds=50, verb
     return estimators, encoders, oof_preds
 
 
+def xgboost_cross_validation_weighted(params, X, y, cv, categorical=None, rounds=50, verbose=True,
+                                      num_boost_rounds=600, weight=True):
+    estimators, encoders = [], []
+    folds_scores, train_scores = [], []
+    oof_preds = np.zeros(X.shape[0])
+    X = X.copy(deep=True)
+
+    if verbose:
+        print(f"{time.ctime()}, Cross-Validation, {X.shape[0]} rows, {X.shape[1]} cols")
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y)):
+
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        if categorical:
+            encoder = ce.cat_boost.CatBoostEncoder(random_state=42)
+            x_train[categorical] = encoder.fit_transform(x_train[categorical].astype("str").fillna("NA"), y_train)
+            x_valid[categorical] = encoder.transform(x_valid[categorical].astype("str").fillna("NA"))
+            encoders.append(encoder)
+
+        if weight:
+            dtrain = xgb.DMatrix(x_train, y_train, weight=x_train["weight"])
+            dvalid = xgb.DMatrix(x_valid, y_valid, weight=x_valid["weight"])
+        else:
+            dtrain = xgb.DMatrix(x_train, y_train)
+            dvalid = xgb.DMatrix(x_valid, y_valid)
+
+        model = xgb.train(
+                        params=params,
+                        dtrain=dtrain,
+                        maximize=False,
+                        num_boost_round=num_boost_rounds,
+                        early_stopping_rounds=rounds,
+                        evals=[(dtrain, "train"), (dvalid, "valid")],
+                        verbose_eval=0,
+        )
+        train_score = model.predict(dtrain)
+        train_score = rmsle(y_train, train_score)
+        oof_preds[valid_idx] = model.predict(dvalid)
+        score = rmsle(y_valid, oof_preds[valid_idx])
+        folds_scores.append(round(score, 5))
+        train_scores.append(round(train_score, 5))
+        if verbose:
+            print(f"Fold {fold + 1}, Train score = {train_score:.5f}, Valid score = {score:.5f}")
+        estimators.append(model)
+
+    if verbose:
+        print_scores(folds_scores, train_scores)
+        print(f"OOF-score: {rmsle(y, oof_preds):.5f}")
+
+    return estimators, encoders, oof_preds
+
+
 def cross_validation(model, X, y, cv):
     estimators, folds_scores, train_scores = [], [], []
     oof_preds = np.zeros(X.shape[0])
