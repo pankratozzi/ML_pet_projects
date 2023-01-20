@@ -4,6 +4,7 @@ warnings.filterwarnings('ignore')
 import pandas as pd
 import numpy as np
 from typing import List, Optional, Tuple
+from functools import partial
 
 import sklearn.model_selection
 
@@ -14,12 +15,13 @@ from sklearn.model_selection import KFold, cross_val_score, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import confusion_matrix, f1_score, classification_report, auc, precision_recall_curve
 from sklearn.metrics import roc_curve, roc_auc_score, precision_score, recall_score, accuracy_score, confusion_matrix
+from sklearn.metrics import mean_squared_error
 from sklearn.base import clone
 
 from itertools import combinations
 import time
 import catboost
-from catboost import CatBoostClassifier, Pool
+from catboost import CatBoostClassifier, Pool, CatBoostRegressor
 
 seed = 42
 
@@ -407,3 +409,150 @@ def check_split_equality(x_train, x_test, estimator=None, params=None, categoric
                          cv=KFold(n_splits=5, shuffle=True, random_state=42)
     )
     print(f"CV-score, mean: {round(np.mean(cv), 4)}, std: {round(np.std(cv), 4)}")
+
+
+def catboost_cross_validation_reg(X: pd.DataFrame,
+                                  y: pd.Series,
+                                  params: dict = None,
+                                  cv=None,
+                                  categorical: list = None,
+                                  textual: list = None,
+                                  rounds: int = 50,
+                                  verbose: bool = True,
+                                  preprocess: object = None,
+                                  score_fn: callable = None,
+                                  calculate_ci: bool = False,
+                                  n_samples: int = 1000,
+                                  confidence: float = 0.95,
+                                  clip: bool = True,
+                                  seed: int = 42):
+
+    if score_fn is None:
+        name = mean_squared_error.__name__
+        score_fn = partial(mean_squared_error, squared=False)
+    else:
+        name = score_fn.__name__
+
+    if cv is None:
+        cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+
+    if params is None:
+        if len(X) <= 50_000:
+            sub_params = {
+                "grow_policy": "SymmetricTree",
+                "boosting_type": "Ordered",
+                "score_function": "Cosine",
+                "depth": 6,
+            }
+        else:
+            sub_params = {
+                "grow_policy": "Lossguide",
+                "boosting_type": "Plain",
+                "score_function": "L2",
+                "depth": 16,
+                "min_data_in_leaf": 200,
+                "max_leaves": 2**16 // 8,
+            }
+        params = {
+            "iterations": 1000,
+            "learning_rate": 0.01,
+            "loss_function": "RMSE",
+            "eval_metric": "RMSE",
+            "task_type": "CPU",
+            "use_best_model": True,
+            "thread_count": -1,
+            "silent": True,
+            "random_seed": seed,
+            "allow_writing_files": False,
+            "bagging_temperature": 1,
+            "max_bin": 255,
+            "l2_leaf_reg": 10,
+            "subsample": 0.9,
+            "bootstrap_type": "MVS",
+            "colsample_bylevel": 0.9,
+        }
+        params.update(sub_params)
+
+    estimators, folds_scores, train_scores = [], [], []
+
+    oof_preds = np.zeros(X.shape[0])
+
+    if verbose:
+        print(f"{time.ctime()}, Cross-Validation, {X.shape[0]} rows, {X.shape[1]} cols")
+        print("Estimating best number of trees.")
+
+    best_iterations = []
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y)):
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        if preprocess is not None:
+            x_train = preprocess.fit_transform(x_train, y_train)
+            x_valid = preprocess.transform(x_valid)
+
+        train_pool = Pool(x_train, y_train, cat_features=categorical, text_features=textual)
+        valid_pool = Pool(x_valid, y_valid, cat_features=categorical, text_features=textual)
+
+        model = CatBoostRegressor(**params).fit(
+            train_pool,
+            eval_set=valid_pool,
+            early_stopping_rounds=rounds
+            )
+
+        best_iterations.append(model.get_best_iteration())
+
+    best_iteration = int(np.median(best_iterations))  # int(np.mean(best_iterations))
+    params["iterations"] = best_iteration
+
+    cv.random_state = seed % 3
+    if verbose:
+        print(f"Evaluating cross validation with {best_iteration} trees.")
+
+    for fold, (train_idx, valid_idx) in enumerate(cv.split(X, y)):
+
+        x_train, x_valid = X.loc[train_idx], X.loc[valid_idx]
+        y_train, y_valid = y[train_idx], y[valid_idx]
+
+        if preprocess is not None:
+            x_train = preprocess.fit_transform(x_train, y_train)
+            x_valid = preprocess.transform(x_valid)
+
+        train_pool = Pool(x_train, y_train, cat_features=categorical, text_features=textual)
+        valid_pool = Pool(x_valid, y_valid, cat_features=categorical, text_features=textual)
+
+        model = CatBoostRegressor(**params).fit(
+            train_pool,
+            eval_set=valid_pool,
+            )
+
+        train_score = catboost.CatBoost.predict(model, train_pool, prediction_type="RawFormulaVal")
+        if clip:
+            train_score = np.clip(train_score, a_min=0.001, a_max=0.999)
+        train_score = score_fn(y_train, train_score)
+
+        valid_scores = catboost.CatBoost.predict(model, valid_pool, prediction_type="RawFormulaVal")
+        if clip:
+            valid_scores = np.clip(valid_scores, a_min=0.001, a_max=0.999)
+
+        oof_preds[valid_idx] = valid_scores
+        score = score_fn(y_valid, oof_preds[valid_idx])
+
+        folds_scores.append(round(score, 5))
+        train_scores.append(round(train_score, 5))
+
+        if verbose:
+            print(f"Fold {fold + 1}, Train score = {train_score:.5f}, Valid score = {score:.5f}")
+        estimators.append(model)
+
+    if verbose:
+        oof_scores = score_fn(y, oof_preds)
+        print_scores(folds_scores, train_scores)
+        print(f"OOF-score {name}: {oof_scores:.5f}")
+        if calculate_ci:
+            bootstrap_scores = create_bootstrap_metrics(y, oof_preds, score_fn, n_samlpes=n_samples)
+            left_bound, right_bound = calculate_confidence_interval(bootstrap_scores, conf_interval=confidence)
+            print(f"Expected metric value lies between: {left_bound:.5f} and {right_bound:.5f}",
+                  f"with confidence of {confidence*100}%")
+
+    return estimators, oof_preds, np.mean(folds_scores)
