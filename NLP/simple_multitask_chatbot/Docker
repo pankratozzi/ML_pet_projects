@@ -1,0 +1,6 @@
+FROM python:3.9
+LABEL maintainer="pankratozzi@gmail.com"
+COPY . /src
+WORKDIR /src
+RUN pip install -r requirements.txt
+CMD ["python3", "app/bot.py"]

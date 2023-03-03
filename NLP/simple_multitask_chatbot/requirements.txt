@@ -1,0 +1,6 @@
+aiogram==2.25.1
+numpy
+torch
+transformers
+datasets
+huggingface_hub
