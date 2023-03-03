@@ -12,7 +12,7 @@ if not BOT_TOKEN:
         "BOT_TOKEN env var is not found, cannot start the bot without it, create it with @BotFather Telegram bot! "
         "Now setting default token"
     )
-    BOT_TOKEN = "6295861964:AAHGMR_aAZogG-hLoWeRGrlccQBZzWID8sk"
+    BOT_TOKEN = "YOUR-TOKEN-HERE"
 else:
     logging.info("BOT_TOKEN found, starting the bot")
 
