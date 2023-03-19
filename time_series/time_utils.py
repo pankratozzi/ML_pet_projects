@@ -5,6 +5,7 @@ import re
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, TransformerMixin
 from statsmodels.tsa.deterministic import DeterministicProcess
+from statsmodels.tsa.seasonal import seasonal_decompose
 
 
 class Fourier(BaseEstimator, TransformerMixin):
@@ -167,3 +168,24 @@ def mean_imputing(df):
         df[feature].fillna(df[feature][df[feature].notnull()].head(
             int(re.findall(r"\d+", feature)[0])
         ).mean(), axis=0, inplace=True)
+
+
+def decompose(df, column_name, plot=False):
+    """
+    A function that returns the trend, seasonality and residual captured by applying both multiplicative and
+    additive model.
+    """
+    result_mul = seasonal_decompose(df[column_name], model='multiplicative', extrapolate_trend='freq')
+    result_add = seasonal_decompose(df[column_name], model='additive', extrapolate_trend='freq')
+
+    if plot:
+        plt.rcParams.update({'figure.figsize': (20, 10)})
+        result_mul.plot().suptitle('Multiplicative Decompose', fontsize=30)
+        result_add.plot().suptitle('Additive Decompose', fontsize=30)
+        plt.show()
+
+    return result_mul, result_add
+
+
+# TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
+# predictions
