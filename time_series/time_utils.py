@@ -1,11 +1,15 @@
 from sklearn import metrics
+from functools import partial
 import numpy as np
 import pandas as pd
 import re
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import TimeSeriesSplit, GroupKFold
 from statsmodels.tsa.deterministic import DeterministicProcess
 from statsmodels.tsa.seasonal import seasonal_decompose
+import warnings
+from catboost import CatBoostRegressor, Pool
 
 
 class Fourier(BaseEstimator, TransformerMixin):
@@ -187,5 +191,119 @@ def decompose(df, column_name, plot=False):
     return result_mul, result_add
 
 
+def timeseries_cv_with_lags_and_moving_stats(data, y_data, model, lags_range=None, moving_stats_range=None,
+                                             aggfunc="mean", seasonality=1, print_cv_scheme=False,
+                                             print_features=False, visualize=True, last_n_train=5,
+                                             max_train_size=None, test_size=None, n_splits=3, gap=0,
+                                             fillna=None,
+                                             metric=partial(metrics.mean_squared_error, squared=False)):
+    if min(lags_range) < test_size:
+        warnings.warn("The number of lags periods should be equal\n"
+                      "or more than forecasting horizon.")
+
+    if min(moving_stats_range) < test_size:
+        warnings.warn("The size of moving window should be equal\n"
+                      "or more than forecasting horizon.")
+
+    tscv = TimeSeriesSplit(max_train_size=max_train_size, test_size=test_size, n_splits=n_splits, gap=gap)
+
+    metric_list = []
+    for cnt, (train_index, test_index) in enumerate(tscv.split(data), 1):
+        x_train, x_test = data.iloc[train_index], data.iloc[test_index]
+        y_train, y_test = y_data.iloc[train_index], y_data.iloc[test_index]
+        y_test_N = y_test.copy(deep=True)
+
+        y_test_N[:] = np.NaN
+        tmp_target = pd.concat([y_train, y_test_N])
+        concat_data = pd.concat([x_train, x_test])
+
+        if print_cv_scheme:
+            print("-"*40)
+            print("Train:",
+                  [x_train.index[0].strftime("%Y-%m-%d"),
+                   x_train.index[-1].strftime("%Y-%m-%d")],
+                  "Test:",
+                  [x_test.index[0].strftime("%Y-%m-%d"),
+                   x_test.index[-1].strftime("%Y-%m-%d")])
+            print("\nTotal number of observations: %d" % (len(x_train) + len(x_test)))
+            print("Train size: %d" % (len(x_train)))
+            print("Test size: %d" % (len(x_test)))
+
+        if print_features:
+            print(f"\nDefence:\n\n{tmp_target}\n")
+
+        if lags_range is not None:
+            for i in lags_range:
+                concat_data[f"Lag_{i}"] = tmp_target.shift(i)
+
+        if moving_stats_range is not None:
+            for i in moving_stats_range:
+                concat_data[f"Moving_{aggfunc}_{i}"] = moving_stats(tmp_target, window=i, aggfunc=aggfunc,
+                                                                    seasonality=seasonality)
+
+        if print_features:
+            pattern = concat_data.columns.str.contains("Lag_|Moving_")
+            feature = concat_data.columns[pattern]
+            print(f"Added features:\n{concat_data[feature]}")
+
+        concat_data = concat_data.sort_index(axis=1)
+
+        x_train = concat_data[:-test_size]
+        x_test = concat_data[-test_size:]
+
+        if fillna == "zero":
+            x_train = x_train.fillna(0, axis=0)
+        if fillna == "mean":
+            x_train = x_train.fillna(x_train.mean(), axis=0)
+
+        if model.__class__.__name__ == "CatBoostRegressor":
+            cat_indices = np.where(x_train.dtypes == object)[0]
+            train_pool = Pool(x_train, y_train, cat_features=cat_indices)
+            model.fit(train_pool)
+        else:
+            model.fit(x_train, y_train)
+
+        predictions = model.predict(x_test)
+        predictions = pd.Series(predictions, index=x_test.index)
+
+        metric_value = metric(y_test, predictions)
+        metric_list.append(metric_value)
+
+        print(f"\nMetric value: {metric_value:.4f} on {cnt} iteration\n")
+
+        if visualize:
+            plt.figure(figsize=(8, 4))
+            plt.xticks(rotation=90)
+            plt.plot(y_train.iloc[-last_n_train:], label="train dataset")
+            plt.plot(predictions, label="forecasts", color="red")
+            plt.plot(y_test, label="test dataset", color="green")
+            plt.grid()
+            plt.legend()
+            plt.show()
+
+        metrics_mean = np.mean(metric_list)
+        print(f"Mean value of metric: {metrics_mean:.4f}")
+
+        if print_features:
+            feature_list = concat_data.columns.tolist()
+            print(f"\nFeatures list:\n{feature_list}")
+
+
+class GroupKFoldAndTimeSeriesSplit:
+    def __init__(self, group_n_splits, time_n_splits):
+        self.group_n_splits = group_n_splits
+        self.time_n_splits = time_n_splits
+
+    def get_n_splits(self, X, y, groups):
+        return self.group_n_splits
+
+    def split(self, X, y=None, groups=None):
+        group_k_fold = GroupKFold(n_splits=self.group_n_splits)
+        for train_index, test_index in group_k_fold.split(X, y, groups=groups):
+            tscv = TimeSeriesSplit(n_splits=self.time_n_splits)
+            for train_index_t, test_index_t in tscv.split(X, y):
+                yield np.intersect1d(train_index, train_index_t), np.intersect1d(test_index, test_index_t)
+
+
 # TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
-# predictions
+# predictions (check residuals trend)
