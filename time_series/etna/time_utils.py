@@ -6,6 +6,9 @@ import re
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
+from sklearn.pipeline import Pipeline as sklearn_pipeline
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.deterministic import DeterministicProcess
 from statsmodels.tsa.seasonal import seasonal_decompose
 import warnings
@@ -13,6 +16,7 @@ from catboost import CatBoostRegressor, Pool
 from etna.datasets import TSDataset
 from etna.pipeline import Pipeline
 from etna.analysis import plot_forecast
+from etna.transforms import TimeSeriesImputerTransform
 
 
 class Fourier(BaseEstimator, TransformerMixin):
@@ -395,6 +399,63 @@ def train_and_evaluate(ts, model, transforms, horizon, metrics, print_metrics=Tr
 
     if print_plots:
         plot_forecast(forecast_ts, test_ts, train_ts, n_train_samples=n_train_samples)
+
+
+def etna_impute(df, strategy="mean", window=1, seasonality=1):
+    ts = TSDataset(df, freq="D")
+    imputer = TimeSeriesImputerTransform(in_column="target", strategy=strategy, window=window,
+                                         seasonality=seasonality)
+    ts.fit_transform([imputer])
+    ts.plot()
+    return ts
+
+
+def get_trend_estimator(df, degree=1, mode="additive"):
+    df = df.copy(deep=True)
+    df["target"] = np.log1p(df["target"]) / np.log(10)
+    series_len = len(df)
+    x = df.index.to_series()
+    if isinstance(type(x.dtype), pd.Timestamp):
+        raise ValueError(f"Index dtype should be np.datetime64 or datetime.datetime")
+
+    x = x.apply(lambda ts: ts.timestamp())
+    x = x.to_numpy().reshape(series_len, 1)
+
+    pipe = sklearn_pipeline([("poly", PolynomialFeatures(degree=degree, include_bias=False)),
+                             ("regression", LinearRegression())])
+
+    pipe.fit(x, df["target"].values)
+    trend = pipe.predict(x)
+    if mode == "additive":
+        target = df["target"] - trend
+    elif mode == "multiplicative":
+        target = df["target"] / trend
+    else:
+        raise ValueError("Set mode == 'additive' or 'multiplicative'")
+
+    return target, pipe
+
+
+def inverse_trend(test, preds, pipe, mode="additive"):
+    test = test.copy(deep=True)
+    series_len = len(test)
+    x = test.index.to_series()
+    if isinstance(type(x.dtype), pd.Timestamp):
+        raise ValueError(f"Index dtype should be np.datetime64 or datetime.datetime")
+
+    x = x.apply(lambda ts: ts.timestamp())
+    x = x.to_numpy().reshape(series_len, 1)
+
+    trend = pipe.predict(x)
+
+    if mode == "additive":
+        preds = np.expm1((preds + trend) * np.log(10))
+    elif mode == "multiplicative":
+        preds = np.expm1((preds * trend) * np.log(10))
+    else:
+        raise ValueError("Set mode == 'additive' or 'multiplicative'")
+
+    return preds
 
 
 # TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
