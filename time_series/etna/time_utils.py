@@ -10,6 +10,9 @@ from statsmodels.tsa.deterministic import DeterministicProcess
 from statsmodels.tsa.seasonal import seasonal_decompose
 import warnings
 from catboost import CatBoostRegressor, Pool
+from etna.datasets import TSDataset
+from etna.pipeline import Pipeline
+from etna.analysis import plot_forecast
 
 
 class Fourier(BaseEstimator, TransformerMixin):
@@ -303,6 +306,95 @@ class GroupKFoldAndTimeSeriesSplit:
             tscv = TimeSeriesSplit(n_splits=self.time_n_splits)
             for train_index_t, test_index_t in tscv.split(X, y):
                 yield np.intersect1d(train_index, train_index_t), np.intersect1d(test_index, test_index_t)
+
+
+def differences(series, periods=1):
+    diff = []
+    for i in range(periods, len(series)):
+        value = series[i] - series[i - periods]
+        diff.append(value)
+    return pd.Series(diff)
+
+
+def etna_validation_optim(ts, train_start, train_end, valid_start, valid_end, model,
+                          horizon, transforms, metrics, optim="minimize"):
+    best_score = np.inf if optim == "minimize" else -np.inf
+    best_params = None
+
+    for transform in transforms:
+        train_ts, valid_ts = ts.train_test_split(train_start=train_start, train_end=train_end,
+                                                 test_start=valid_start, test_end=valid_end)
+
+        pipe = Pipeline(model=model, transforms=transform, horizon=horizon)
+        pipe.fit(train_ts)
+
+        forecast_ts = pipe.forecast(valid_ts)
+        metrics_score = metrics(y_true=y_valid, y_pred=forecast_ts).get("main")
+        print(f"Transform: {transform}")
+        print(f"{metrics.__class__.__name__}: {metrics_score}")
+
+        if (optim == "minimize" and metrics_score < best_score) or (optim == "maximize" and metrics_score > best_score):
+            best_score = metrics_score
+            best_params = {'transform': transform}
+
+    print(f"Best transformation set: {best_params}")
+    print(f"Best metric {metrics.__class__.__name__}: {best_score}")
+
+
+def etna_cv_optimize(ts, model, horizon, transforms, n_folds, mode, metrics,
+                     refit=True, n_train_samples=10, optim="minimize"):
+    train_ts, test_ts = ts.train_test_split(test_size=horizon)
+    best_params = None
+    best_score = np.inf if optim == "minimize" else -np.inf
+
+    for transform in transforms:
+        pipe = Pipeline(model=model, transforms=transform, horizon=horizon)
+        df_metrics, _, _ = pipe.backtest(mode=mode, n_folds=n_folds, ts=train_ts, metrics=[metrics],
+                                         aggregate_metrics=False, joblib_params=dict(verbose=0))
+
+        metrics_mean = df_metrics[metrics.__class__.__name__].mean()
+        metrics_std = df_metrics[metrics.__class__.__name__].std()
+
+        print(f"Transform:\n{transform}")
+        print(f"{metrics.__class__.__name__}_mean: {metrics_mean}")
+        print(f"{metrics.__class__.__name__}_std: {metrics_std}")
+
+        if (optim == "minimize" and metrics_mean < best_score) or (optim == "maximize" and metrics_mean > best_score):
+            best_score = metrics_mean
+            best_params = {'transform': transform}
+
+    print(f"Best transformation set:\n{best_params}")
+    print(f"Best metric {metrics.__class__.__name__}: {best_score}")
+
+    if refit:
+        pipe = Pipeline(model=model, transforms=best_params.get("transform"), horizon=horizon)
+        pipe.fit(train_ts)
+        forecast_ts = pipe.forecast()
+
+        print(metrics(y_true=test_ts, y_pred=forecast_ts))
+
+        plot_forecast(forecast_ts, test_ts, train_ts, n_train_samples=n_train_samples)
+
+
+def train_and_evaluate(ts, model, transforms, horizon, metrics, print_metrics=True, print_plots=True,
+                       n_train_samples=10):
+    if not print_plots and n_train_samples is None:
+        raise ValueError(f"Set n_train_samples should be set with print_plots=True")
+
+    train_ts, test_ts = ts.train_test_split(test_size=horizon)
+    pipe = Pipeline(model=model, transforms=transforms, horizon=horizon)
+    pipe.fit(train_ts)
+    forecast_ts = pipe.forecast()
+
+    segment_metrics = metrics(test_ts, forecast_ts)
+    segment_metrics = pd.Series(segment_metrics)
+
+    if print_metrics:
+        print(segment_metrics.to_string(), "\n")
+        print(f"Mean metric: {np.mean(segment_metrics)}")
+
+    if print_plots:
+        plot_forecast(forecast_ts, test_ts, train_ts, n_train_samples=n_train_samples)
 
 
 # TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
