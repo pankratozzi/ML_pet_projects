@@ -458,5 +458,49 @@ def inverse_trend(test, preds, pipe, mode="additive"):
     return preds
 
 
+def etna_staged_cv_optimize(ts, model, horizon, init_transforms, transforms, n_folds, mode, metrics,
+                            refit=True, n_train_samples=15, optim="minimize"):
+    train_ts, test_ts = ts.train_test_split(test_size=horizon)
+    best_score = np.inf if optim == "minimize" else -np.inf
+    best_params = {}
+
+    el_list, transform_list = [], []
+
+    for el in transforms:
+        el_list.append(el)
+        transform_list.append(el_list.copy())
+
+    for i in range(len(transform_list)):
+        transform_list[i] = init_transforms + transform_list[i]
+
+    for transform in transform_list:
+        pipe = Pipeline(model=model, transforms=transform, horizon=horizon)
+        df_metrics, _, _ = pipe.backtest(mode=mode, n_folds=n_folds, ts=train_ts, metrics=[metrics],
+                                         aggregate_metrics=False, joblib_params=dict(verbose=0))
+
+        metrics_mean = df_metrics[metrics.__class__.__name__].mean()
+        metrics_std = df_metrics[metrics.__class__.__name__].std()
+
+        print(f"Transforms:\n{transform}")
+        print(f"{metrics.__class__.__name__}_mean: {metrics_mean}")
+        print(f"{metrics.__class__.__name__}_std: {metrics_std}")
+
+        if (optim == "minimize" and metrics_mean < best_score) or (optim == "maximize" and metrics_mean > best_score):
+            best_score = metrics_mean
+            best_params = {'transform': transform}
+
+    print(f"Best transform set:\n{best_params}\n")
+    print(f"Best {metrics.__class__.__name__} cv: {best_score}\n")
+
+    if refit:
+        pipe = Pipeline(model=model, transforms=best_params.get("transform"), horizon=horizon)
+        pipe.fit(train_ts)
+        forecast_ts = pipe.forecast()
+
+        print(metrics(y_true=test_ts, y_pred=forecast_ts))
+
+        plot_forecast(forecast_ts, test_ts, train_ts, n_train_samples=n_train_samples)
+
+
 # TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
 # predictions (check residuals trend)
