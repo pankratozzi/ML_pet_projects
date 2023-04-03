@@ -6,7 +6,7 @@ import re
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
-from sklearn.pipeline import Pipeline as sklearn_pipeline
+from sklearn.pipeline import Pipeline as sklearn_pipeline, make_pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.deterministic import DeterministicProcess
@@ -411,6 +411,7 @@ def etna_impute(df, strategy="mean", window=1, seasonality=1):
 
 
 def get_trend_estimator(df, degree=1, mode="additive"):
+    # log transform and detrending
     df = df.copy(deep=True)
     df["target"] = np.log1p(df["target"]) / np.log(10)
     series_len = len(df)
@@ -432,11 +433,13 @@ def get_trend_estimator(df, degree=1, mode="additive"):
         target = df["target"] / trend
     else:
         raise ValueError("Set mode == 'additive' or 'multiplicative'")
-
+    # use pipe to predict test trend (create test timestamp as feature)
     return target, pipe
 
 
-def inverse_trend(test, preds, pipe, mode="additive"):
+def inverse_trend(test, pipe, preds=None, mode="additive", get_trend=False):
+    # set 'get_trend' to True in case of using trend as feature
+    # otherwise return modified predictions (adding trend and exp)
     test = test.copy(deep=True)
     series_len = len(test)
     x = test.index.to_series()
@@ -447,6 +450,8 @@ def inverse_trend(test, preds, pipe, mode="additive"):
     x = x.to_numpy().reshape(series_len, 1)
 
     trend = pipe.predict(x)
+    if get_trend:
+        return trend
 
     if mode == "additive":
         preds = np.expm1((preds + trend) * np.log(10))
@@ -500,6 +505,79 @@ def etna_staged_cv_optimize(ts, model, horizon, init_transforms, transforms, n_f
         print(metrics(y_true=test_ts, y_pred=forecast_ts))
 
         plot_forecast(forecast_ts, test_ts, train_ts, n_train_samples=n_train_samples)
+
+
+def groupby_moving_stats(df, by, target, min_periods=1, window=4, fillna=0,
+                         aggfunc="mean", offset=False, start_date=None):
+    if offset and start_date is not None:
+        df = df[df.index >= start_date]
+
+    if not isinstance(by, list):
+        by = [by]
+
+    df = df.groupby(by)[target].transform(lambda x: x.shift(1).rolling(
+        window=window, min_periods=min_periods
+    ).agg(aggfunc))
+
+    df.fillna(fillna, inplace=True)
+    return df
+
+
+def expanding_stats(series, min_periods=1, periods=1, aggfunc="mean", fillna=0):
+    features = series.shift(periods=periods).expanding(min_periods=min_periods).agg(aggfunc)
+    features.fillna(fillna, inplace=True)
+    return features
+
+
+def grouped_stats(df_target, df_calc, var, by, func="mean", fillna=None):
+    if not isinstance(by, list):
+        by = [by]
+
+    name = f"{var}_by_{by}_{func}"
+    grp = df_calc.groupby(by)[[var]].agg(func)
+    grp.columns = [name]
+
+    var = pd.merge(df_target[by], grp, left_on=by, right_index=True, how="left")[name]
+
+    if fillna is not None:
+        var.fillna(fillna, inplace=True)
+
+    return var
+
+
+def forecast_trend(train_target, calc_trend_for_test=False, test_size=4, freq="MS"):
+    regressor = make_pipeline(PolynomialFeatures(degree=1, include_bias=False),
+                              LinearRegression(fit_intercept=False))
+    n_timepoints = len(train_target)
+    X = np.arange(n_timepoints).reshape(-1, 1)
+
+    regressor.fit(X, train_target)
+    coefs = regressor.named_steps["linearregression"].coef_
+
+    train_trend_pred = regressor.predict(X)
+    train_trend_pred = pd.Series(train_trend_pred, index=train_target.index)
+
+    if not calc_trend_for_test:
+        return train_trend_pred, coefs
+    else:
+        start = train_trend_pred[-1] + coefs[1]
+        count = test_size
+        step = coefs[1]
+        numbers = []
+
+        for i in range(count):
+            numbers.append(start)
+            start += step
+
+        test_trend_pred = pd.Series(numbers)
+        future_dates = pd.date_range(start=train_target.index[-1],
+                                     periods=test_size + 1,
+                                     freq=freq,
+                                     closed="right")
+        test_trend_pred.index = future_dates
+        # forecasted trends. Later: subtract or divide it from the original target
+        # additive or multiplicative trend
+        return train_trend_pred, test_trend_pred
 
 
 # TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
