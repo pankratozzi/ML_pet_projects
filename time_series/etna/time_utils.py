@@ -1,18 +1,24 @@
-from sklearn import metrics
-from functools import partial
+import warnings
+
+from functools import partial, reduce
 import numpy as np
 import pandas as pd
 import re
 import matplotlib.pyplot as plt
+
+from sklearn import metrics
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import TimeSeriesSplit, GroupKFold
 from sklearn.pipeline import Pipeline as sklearn_pipeline, make_pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
+
 from statsmodels.tsa.deterministic import DeterministicProcess
 from statsmodels.tsa.seasonal import seasonal_decompose
-import warnings
+from statsmodels.tsa.api import ExponentialSmoothing
+
 from catboost import CatBoostRegressor, Pool
+
 from etna.datasets import TSDataset
 from etna.pipeline import Pipeline
 from etna.analysis import plot_forecast
@@ -580,5 +586,181 @@ def forecast_trend(train_target, calc_trend_for_test=False, test_size=4, freq="M
         return train_trend_pred, test_trend_pred
 
 
-# TODO: trend extraction - DeterministicProcess, divide from target for GBoosting to fit on residuals, than add to
-# predictions (check residuals trend)
+def make_calendar_features(data, date_column, to_cat=False, last_day=3, fillna=True, has_minutes=False,
+                           holiday_dates=None):
+    start = data.shape[1]
+    data["year"] = data[date_column].dt.year
+    data["quarter"] = data[date_column].dt.quarter
+    data["month"] = data[date_column].dt.month
+    data["dayofyear"] = data[date_column].dt.dayofyear
+    data["dayofmonth"] = data[date_column].dt.day
+    data["dayofweek"] = data[date_column].dt.dayofweek + 1
+    data["week"] = data[date_column].dt.strftime("%U")
+    data["weekend"] = np.where(data["dayofweek"].isin([6, 7]), 1, 0)
+
+    def season(month):
+        if (month > 2) and (month <= 5):
+            return "spring"
+        elif (month > 11) and (month < 3):
+            return "winter"
+        elif (month > 5) and (month <= 8):
+            return "summer"
+        return "fall"
+    data["season"] = data["month"].apply(lambda x: season(x))
+
+    def week_of_month(dt):
+        first_day = dt.replace(day=1)
+        dom = dt.day
+        adj_dom = dom + first_day.weekday()
+        return int(np.ceil(adj_dom / 7))
+
+    data["week_of_month"] = data["day"].apply(week_of_month).values
+
+    def decades(series):
+        return [np.ceil(d.day / 10.5) for d in series]
+
+    data["decades"] = decades(data["day"])
+    data["year_start"] = data["day"].dt.is_year_start
+    data["year_end"] = data["day"].dt.is_year_end
+    data["quarter_start"] = data["day"].dt.is_quarter_start
+    data["quarter_end"] = data["day"].dt.is_quarter_end
+
+    data["month_start"] = data["day"].dt.is_month_start
+    data["month_end"] = data["day"].dt.is_month_end
+
+    end = data.shape[1]
+
+    if has_minutes:
+        data["hour"] = data[date_column].dt.hour
+        data["half_of_day"] = data[date_column].apply(lambda x: x.hour // 12)
+        data["third_of_day"] = data[date_column].apply(lambda x: x.hour // 8)
+        data["quarter_of_day"] = data[date_column].apply(lambda x: x.hour // 6)
+        data["minute"] = data[date_column].dt.minute
+        data["30_min_interval"] = data[date_column].apply(lambda x: x.minute // 30)
+        data["15_min_interval"] = data[date_column].apply(lambda x: x.minute // 15)
+
+        end = data.shape[1]
+
+        def part_of_day(hour):
+            return ("morning" if 5 <= hour <= 11
+                    else "afternoon" if 12 <= hour <= 17
+                    else "evening" if 18 <= hour <= 23
+                    else "night")
+        data["part_of_day"] = data["hour"].apply(lambda x: part_of_day(x))
+
+    first_days = pd.tseries.offsets.SemiMonthBegin(day_of_month=16)
+    first_days_month = pd.DataFrame({"day": pd.date_range(data[date_column][0],
+                                                          data[date_column][-1],
+                                                          freq=first_days),
+                                     "first_days_in_month": 1})
+    last_days = pd.tseries.offsets.SemiMonthEnd(day_of_month=16)
+    last_days_month = pd.DataFrame({"day": pd.date_range(data[date_column][0],
+                                                          data[date_column][-1],
+                                                          freq=last_days),
+                                     "last_days_in_month": 1})
+    last_day_month = pd.offsets.LastWeekOfMonth(weekday=last_day)
+    last_day_of_month = pd.DataFrame({"day": pd.date_range(data[date_column][0],
+                                                           data[date_column][-1],
+                                                           freq=last_day_month),
+                                      "last_day_month": 1})
+    first_work_day_month = pd.DataFrame({"day": pd.date_range(data[date_column][0],
+                                                             data[date_column][-1],
+                                                             freq="BMS"),
+                                        "first_work_day_month": 1})
+    last_work_day_month = pd.DataFrame({"day": pd.date_range(data[date_column][0],
+                                                          data[date_column][-1],
+                                                          freq="BM"),
+                                        "last_work_day_month": 1})
+    dfs = [first_days_month, last_days_month, last_day_of_month, first_work_day_month, last_work_day_month]
+    data = reduce(lambda left, right: pd.merge(left, right, how="left", on="day"), dfs)
+    if fillna:
+        data.fillna(0, inplace=True)
+    for col in data.columns[-5:]:
+        data[col] = data[col].astype(int)
+
+    if holiday_dates is not None:
+        holidays = pd.DataFrame({"holidays": 1, date_column: pd.to_datetime(holiday_dates)})
+        data = pd.merge(data, holidays, on=date_column, how="left")
+        data["holidays"] = data["holidays"].fillna(0)
+
+    data["frac_quarter"] = data["quarter"] / 4
+    data["frac_month"] = data["month"] / 12
+    data["frac_dayofyear"] = data["dayofyear"] / 365.25
+    data["frac_dayofmonth"] = data["dayofmonth"] / 31
+    data["frac_dayofweek"] = data["dayofweek"] / 7
+
+    if to_cat:
+        for col in data.columns[start:end]:
+            data[col] = data[col].astype(int).astype(str)
+
+    return data
+
+
+def fourier(df, date_column, period=None, order=None, mods=None, out_column=None):
+    """
+    :param df: pandas dataframe with timeseries
+    :param date_column: name of time column
+    :param period: period of seasonality w.r.t frequency of series, >= 2
+    :param order: upper bound of Fourier order component, >= 1 and <= ceil(period/2); 3 - often optimal choice
+    :param mods: exact method to calculate harmonics, mods=[1,3,4] means sin of 1st and 2nd order, cosine of 2nd order
+                 >= 1 and < period
+    :param out_column: out column suffix
+    :return: input dataframe with fourier-features added
+
+    Period table
+    _________________________________________________________________
+    | freq of series |  week   |   month   |   quarter   |   year   |
+    | quarterly      |         |           |             |    4     |
+    | monthly        |         |           |      3      |    12    |
+    | weekly         |         | 4.348125  | 13.044375   | 52.1775  |
+    | daily          |    7    | 30.436875 | 91.310625   | 365.2425 |
+    -----------------------------------------------------------------
+    """
+    def _get_column_name(mod):
+        if out_column is None:
+            return f"Fourier_{mod}"
+        else:
+            return f"{out_column}_{mod}"
+
+    if period < 2:
+        raise ValueError("Period should be at least 2")
+    if order is not None and mods is None:
+        if order < 1 or order > np.ceil(period / 2):
+            raise ValueError("Order should be within [1, ceil(period/2)] range")
+
+        mods = [mod for mod in range(1, 2 * order + 1) if mod < period]
+    elif mods is not None and order is None:
+        if min(mods) < 1 or max(mods) >= period:
+            raise ValueError("Every mod should be within [1, int(period)) range")
+
+    features = pd.DataFrame(index=df[date_column])
+    elapsed = np.arange(features.shape[0]) / period
+    for mod in mods:
+        order = (mod + 1) // 2
+        is_cos = mod % 2 == 0
+        features[_get_column_name(mod)] = np.sin(
+            2 * np.pi * order * elapsed + np.pi / 2 * is_cos
+        )
+    df = pd.merge(df, features, left_on=date_column, right_index=True, how="left")
+    return df
+
+
+def exponential_smoothing_features(df_train, df_test, target_column, horizon,
+                                   trend="additive", seasonal="multiplicative",
+                                   periods=12, freq="MS", smoothing_level=0, smoothing_trend=0.4,
+                                   smoothing_seasonal=1, optimized=False):
+    triple = ExponentialSmoothing(
+        df[target_column],
+        trend=trend,
+        seasonal=seasonal,
+        seasonal_periods=periods,
+        freq=freq
+    ).fit(smoothing_level=smoothing_level,
+          smoothing_trend=smoothing_trend,
+          smoothing_seasonal=smoothing_seasonal,
+          optimized=optimized,
+          )
+    df_train["ets_feature"] = triple.fittedvalues
+    df_test["ets_feature"] = triple.forecast(horizon)
+
+    return df_train, df_test
