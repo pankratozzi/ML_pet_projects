@@ -4,7 +4,7 @@ import time
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import roc_auc_score
 from typing import Optional
-import catbosot
+import catboost
 from catboost import CatBoostClassifier, Pool
 import matplotlib.pyplot as plt
 import seaborn as sns
