@@ -870,6 +870,25 @@ def thresholded_catboost_cross_validation(X: pd.DataFrame,
     return estimators, oof_preds, np.mean(folds_scores)
 
 
+def create_multiple_bootstrap_metrics(y_true: np.array,
+                                      y_pred: list,
+                                      metric: callable,
+                                      n_samples: int = 1000) -> list:
+    scores = np.zeros((len(y_pred), n_samples))
+
+    if isinstance(y_true, pd.Series):
+        y_true = y_true.values
+
+    bootstrap_idx = create_bootstrap_samples(y_true, n_samples)
+    for j, idx in enumerate(bootstrap_idx):
+        running_scores = np.zeros((len(y_pred)))
+        for i, pred in enumerate(y_pred):
+            running_scores[i] = metric(y_true[idx], pred[idx])
+        scores[:, j] = running_scores
+
+    return scores
+
+
 def compare_models(oof_preds: list,
                    y_true: np.ndarray,
                    metric: callable,
@@ -888,9 +907,9 @@ def compare_models(oof_preds: list,
         model_names = [f"model_{i + 1}" for i in range(len(oof_preds))]
 
     n_comparisons = (factorial(len(oof_preds)) / (factorial(2) * factorial(len(oof_preds) - 2)))
-    scores = [np.array(create_bootstrap_metrics(y_true, oof_pred, metric, n_samples)) for oof_pred in oof_preds]
+    scores = create_multiple_bootstrap_metrics(y_true, oof_preds, metric, n_samples)
     if sample != 0:
-        scores = [np.random.choice(score, size=sample) for score in scores]
+        scores = [np.random.choice(score, size=sample, replace=False) for score in scores]
 
     df = scores[0].shape[0] - 1
 
