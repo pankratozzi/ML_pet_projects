@@ -3,6 +3,7 @@ import numpy as np
 import time
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, KFold
 from typing import Optional
 import catboost
 from catboost import CatBoostClassifier, Pool
@@ -898,8 +899,10 @@ def compare_models(oof_preds: list,
                    sample: int = 0,
                    conf_level: float = 0.95,
                    rope_interval: list = [-0.01, 0.01],
-                   n_samples: int = 3000) -> pd.DataFrame:
-    from scipy.stats import t, ttest_rel
+                   n_samples: int = 3000,
+                   verbose: bool = False,
+                   correct_bias: bool = False) -> pd.DataFrame:
+    from scipy.stats import t, ttest_rel, shapiro
     from itertools import combinations
     from math import factorial
 
@@ -912,6 +915,21 @@ def compare_models(oof_preds: list,
         scores = [np.random.choice(score, size=sample, replace=False) for score in scores]
 
     df = scores[0].shape[0] - 1
+
+    for i, prediction in enumerate(scores, 1):
+        if verbose:
+            tmp = pd.Series(data=prediction)
+            skew, kurt = tmp.skew(), tmp.kurtosis()  # usually == 3.0
+            print(f"Skewness for model {i}: {skew:.4f} (ideal = 0), kurtosis: {kurt:.4f} (kurtosis of normal == 0.0 )")
+        p_val = shapiro(prediction)[1]
+        if p_val < 0.05:
+            print(f"Samples from model {i} are not normally distributed, p-value: {p_val:6f}")
+            if correct_bias:
+                print(f"Correcting bias for model {i}")
+                true_metric = metric(y_true, oof_preds[i-1])
+                boot_mean = np.mean(prediction)
+                delta_val = np.abs(boot_mean - true_metric)
+                scores[i-1] = prediction + delta_val
 
     def corrected_std(differences, n_train, n_test):
         kr = len(differences)
@@ -978,3 +996,55 @@ def calculate_feature_separating_ability(
     scores = scores.sort_values(ascending=False)
 
     return scores
+
+
+def make_lags(ts, lags, lead_time=1):
+    return pd.concat(
+        {
+            f'y_lag_{i}': ts.shift(i)
+            for i in range(lead_time, lags + lead_time)
+        },
+        axis=1)
+
+
+def moving_stats(series, alpha=1, seasonality=1, periods=1, min_periods=1, window=1, aggfunc="mean", fillna=None):
+    size = window if window != -1 else len(series) - 1
+    alpha_range = [alpha**i for i in range(0, size)]
+
+    min_required_len = max(min_periods - 1, 0) * seasonality + 1
+
+    def get_required_lags(series):
+        return pd.Series(series.values[::-1][:: seasonality])
+
+    def aggregate_window(series):
+        tmp_series = get_required_lags(series)
+        size = len(tmp_series)
+        tmp = tmp_series * alpha_range[-size:]
+
+        if aggfunc == "mdad":
+            return tmp.to_frame().agg(lambda x: np.nanmedian(np.abs(x - np.nanmedian(x))))
+        else:
+            return tmp.agg(aggfunc)
+
+    features = series.shift(periods=periods).rolling(window=seasonality * window if window != -1 else len(series) - 1,
+                                                     min_periods=min_required_len).aggregate(aggregate_window)
+
+    if fillna is not None:
+        features.fillna(fillna, inplace=True)
+
+    return features
+
+
+def calculate_lags_and_stats(df, target, lags_range=None, moving_stats_range=None, periods=1, min_periods=1,
+                             aggfunc="mean", seasonality=1):
+    if lags_range is not None:
+        for i in lags_range:
+            df[f"Lag_{i}"] = target.shift(i)
+
+    if moving_stats_range is not None:
+        for i in moving_stats_range:
+            df[f"Moving_{aggfunc}_{i}"] = moving_stats(
+                target, window=i, periods=periods, min_periods=min_periods, aggfunc=aggfunc,
+                seasonality=seasonality,
+            )
+    return df
