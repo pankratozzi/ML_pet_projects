@@ -901,7 +901,8 @@ def compare_models(oof_preds: list,
                    rope_interval: list = [-0.01, 0.01],
                    n_samples: int = 3000,
                    verbose: bool = False,
-                   correct_bias: bool = False) -> pd.DataFrame:
+                   correct_bias: bool = False,
+                   custom_correct_bias: bool = False) -> pd.DataFrame:
     from scipy.stats import t, ttest_rel, shapiro
     from itertools import combinations
     from math import factorial
@@ -920,7 +921,28 @@ def compare_models(oof_preds: list,
         model_names = [f"model_{i + 1}" for i in range(len(oof_preds))]
 
     n_comparisons = (factorial(len(oof_preds)) / (factorial(2) * factorial(len(oof_preds) - 2)))
-    scores = create_multiple_bootstrap_metrics(y_true, oof_preds, metric, n_samples)
+
+    if correct_bias:
+        from scipy.stats import bootstrap
+
+        scores = np.zeros((len(oof_preds), n_samples))
+        indices = (list(range(len(y_true))), )
+
+        for i, prediction in enumerate(oof_preds):
+
+            def get_metric_value(idx):
+                return metric(y_true[idx], prediction[idx])
+
+            res = bootstrap(data=indices,
+                            statistic=get_metric_value,
+                            confidence_level=0.95,
+                            method='BCa',  # corrected bias
+                            n_resamples=n_samples,
+                            random_state=123)
+            scores[i, :] = res.bootstrap_distribution
+    else:
+        scores = create_multiple_bootstrap_metrics(y_true, oof_preds, metric, n_samples)
+
     if sample != 0:
         scores = [np.random.choice(score, size=sample, replace=False) for score in scores]
 
@@ -935,7 +957,7 @@ def compare_models(oof_preds: list,
         p_val = shapiro(prediction)[1]
         if p_val < 0.05:
             print(f"Samples from model {i} are not normally distributed, p-value: {p_val:6f}")
-            if correct_bias:
+            if custom_correct_bias:
                 print(f"Correcting bias for model {i}")
                 true_metric = metric(y_true, oof_preds[i-1])
                 boot_mean = np.mean(prediction)
