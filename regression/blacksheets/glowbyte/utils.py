@@ -893,28 +893,80 @@ def create_multiple_bootstrap_metrics(y_true: np.array,
 
 
 def compare_models(oof_preds: list,
-                   y_true: np.ndarray,
+                   y_true: Union[np.ndarray, pd.Series],
                    metric: callable,
-                   n_train: int,
-                   n_test: int,
+                   n_train: Optional[int],
+                   n_test: Optional[int],
                    model_names=None,
                    sample: int = 0,
                    conf_level: float = 0.95,
                    rope_interval: list = [-0.01, 0.01],
-                   n_samples: int = 3000) -> pd.DataFrame:
-    from scipy.stats import t, ttest_rel
+                   n_samples: int = 3000,
+                   verbose: bool = False,
+                   correct_bias: bool = False,
+                   custom_correct_bias: bool = False) -> pd.DataFrame:
+    from scipy.stats import t, ttest_rel, shapiro
     from itertools import combinations
     from math import factorial
+
+    """
+    Originally we have to obtain models scores by RepeatedKFold(n_folds=10, n_repeats=10)
+    to get 100 estimated metric values by each model, for Nado-Bengio t-test,
+    but having complex heavy models training and evaluating k*100 models is very expensive, so
+    here we are using bootstrap sampling to get different estimations on one test set by k pre-fitted models
+    suppose that in case of lightweight models and relatively small dataset kfold is preferred
+    """
+    if isinstance(y_true, pd.Series):
+        y_true = y_true.copy().values
 
     if model_names is None:
         model_names = [f"model_{i + 1}" for i in range(len(oof_preds))]
 
     n_comparisons = (factorial(len(oof_preds)) / (factorial(2) * factorial(len(oof_preds) - 2)))
-    scores = create_multiple_bootstrap_metrics(y_true, oof_preds, metric, n_samples)
+
+    if correct_bias:
+        from scipy.stats import bootstrap
+
+        scores = np.zeros((len(oof_preds), n_samples))
+        indices = (list(range(len(y_true))), )
+
+        for i, prediction in enumerate(oof_preds):
+
+            def get_metric_value(idx):
+                return metric(y_true[idx], prediction[idx])
+
+            res = bootstrap(data=indices,
+                            statistic=get_metric_value,
+                            confidence_level=0.95,
+                            method='BCa',  # corrected bias
+                            n_resamples=n_samples,
+                            random_state=123)
+            scores[i, :] = res.bootstrap_distribution
+    else:
+        scores = create_multiple_bootstrap_metrics(y_true, oof_preds, metric, n_samples)
+
     if sample != 0:
         scores = [np.random.choice(score, size=sample, replace=False) for score in scores]
 
     df = scores[0].shape[0] - 1
+
+    # not suitable here as non-normal distribution in fact does not indicate the bias of mean (mean of differences)
+    for i, prediction in enumerate(scores, 1):
+        if verbose:
+            tmp = pd.Series(data=prediction)
+            skew, kurt = tmp.skew(), tmp.kurtosis()  # usually == 3.0
+            print(f"Skewness for model {i}: {skew:.4f} (ideal = 0), kurtosis: {kurt:.4f} (kurtosis of normal == 0.0 )")
+        shap_test = pd.Series(prediction)
+        shap_test = shap_test.sample(1000, replace=False) if len(prediction) > 1000 else shap_test
+        p_val = shapiro(shap_test)[1]  # as the test is sensitive to the sample size; also not normal maybe due to overfitting
+        if p_val < 0.05:
+            print(f"Samples from model {i} are not normally distributed, p-value: {p_val:6f}")
+            if custom_correct_bias:
+                print(f"Correcting bias for model {i}")
+                true_metric = metric(y_true, oof_preds[i-1])
+                boot_mean = np.mean(prediction)
+                delta_val = np.abs(boot_mean - true_metric)
+                scores[i-1] = prediction + delta_val
 
     def corrected_std(differences, n_train, n_test):
         kr = len(differences)
