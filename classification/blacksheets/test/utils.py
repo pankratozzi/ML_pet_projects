@@ -4,7 +4,7 @@ import time
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, KFold
-from typing import Optional
+from typing import Optional, Union
 import catboost
 from catboost import CatBoostClassifier, Pool
 import matplotlib.pyplot as plt
@@ -891,10 +891,10 @@ def create_multiple_bootstrap_metrics(y_true: np.array,
 
 
 def compare_models(oof_preds: list,
-                   y_true: np.ndarray,
+                   y_true: Union[np.ndarray, pd.Series],
                    metric: callable,
-                   n_train: int,
-                   n_test: int,
+                   n_train: Optional[int],
+                   n_test: Optional[int],
                    model_names=None,
                    sample: int = 0,
                    conf_level: float = 0.95,
@@ -906,6 +906,16 @@ def compare_models(oof_preds: list,
     from itertools import combinations
     from math import factorial
 
+    """
+    Originally we have to obtain models scores by RepeatedKFold(n_folds=10, n_repeats=10)
+    to get 100 estimated metric values by each model, for Nado-Bengio t-test,
+    but having complex heavy models training and evaluating k*100 models is very expensive, so
+    here we are using bootstrap sampling to get different estimations on one test set by k pre-fitted models
+    suppose that in case of lightweight models and relatively small dataset kfold is preferred
+    """
+    if isinstance(y_true, pd.Series):
+        y_true = y_true.copy().values
+
     if model_names is None:
         model_names = [f"model_{i + 1}" for i in range(len(oof_preds))]
 
@@ -916,6 +926,7 @@ def compare_models(oof_preds: list,
 
     df = scores[0].shape[0] - 1
 
+    # not suitable here as non-normal distribution in fact does not indicate the bias of mean (mean of differences)
     for i, prediction in enumerate(scores, 1):
         if verbose:
             tmp = pd.Series(data=prediction)
