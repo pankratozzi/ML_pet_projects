@@ -612,7 +612,7 @@ class SplineCalibratedClassifierMulticlassCV(BaseEstimator, ClassifierMixin):
         y_mod = y_mod.astype(int)
         if ((type(self.cv)==str) and (self.cv=='prefit')):
             self.uncalibrated_classifier = self.base_estimator
-            y_pred = self.uncalibrated_classifier.predict_proba(X)[:,1]
+            y_pred = self.uncalibrated_classifier.predict_proba(X)
 
         else:
             y_pred = np.zeros((len(y_mod),num_classes))
@@ -668,7 +668,7 @@ class SplineCalibratedClassifierMulticlassCV(BaseEstimator, ClassifierMixin):
             The predicted probas.
         """
         # check_is_fitted(self, ["classes_", "calibrated_classifier"])
-        return self.calib_func(self.uncalibrated_classifier.predict_proba(X))
+        return self.calib_func[0](self.uncalibrated_classifier.predict_proba(X))
 
 
     def predict(self, X):
