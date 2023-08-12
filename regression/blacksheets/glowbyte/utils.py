@@ -1296,3 +1296,106 @@ def plot_confusion_matrix_mul(y_true,
     plt.ylabel('True label')
     plt.xlabel('Predicted label')
     plt.show()
+
+
+def compute_ece_data(predict_proba, y_true, bin_number):
+    """
+    Подготовка данных для рассчета ECE (Expected Calibration Error).
+    Разбиение данных на bin_number равно-мощностных групп.
+
+    Принимает:
+    - predict_proba: оценка уверенности модели (вероятности для откалиброванных моделей)
+    - y_true: реальные лейблы
+    - bin_number: число бинов
+
+    Возвращает:
+    - mean_predicted_bin_score: средняя прогнозная оцнека в бинах
+    - mean_actual_bin_score: средняя фактическая оцнека в бинах
+    - bin_counters: число самплов в каждом из бинов
+    """
+
+    predict_proba = np.array(predict_proba)
+    y_valid = np.array(y_true)
+    sorted_ind = np.argsort(predict_proba)
+    mean_predicted_bin_score = [[] for _ in range(bin_number)]
+    mean_actual_bin_score = [[] for _ in range(bin_number)]
+    bin_counters = [[] for _ in range(bin_number)]
+    index = 0
+    length_array = len(sorted_ind)
+    step = 1. * length_array // bin_number
+    for _ in range(bin_number):
+        current = int(step * index)
+        next_ = int(step * (index + 1))
+        mean_predicted_bin_score[index] = np.mean(predict_proba[sorted_ind[current:next_]])
+        mean_actual_bin_score[index] = np.mean(y_true[sorted_ind[current:next_]])
+        bin_counters[index] = len(y_valid[sorted_ind[current:next_]])
+        index += 1
+
+    return mean_predicted_bin_score, mean_actual_bin_score, bin_counters
+
+
+def compute_ece(mean_predicted_bin_score, mean_actual_bin_score, bin_counters):
+    """
+    Рассчет ECE (Expected Calibration Error).
+
+    Принимает:
+    - mean_predicted_bin_score: средняя прогнозная оцнека в бинах
+    - mean_actual_bin_score: средняя фактическая оцнека в бинах
+    - bin_counters: число самплов в каждом из бинов
+
+    Возвращает:
+     - ece: Expected Calibration Error
+    """
+
+    ece = 0
+    for i in range(len(bin_counters)):
+        ece += bin_counters[i] * np.abs((mean_predicted_bin_score[i] - mean_actual_bin_score[i]))
+    ece /= sum(bin_counters)
+
+    return ece
+
+
+def plot_calibration_diagram(mean_predicted_bin_score, mean_actual_bin_score, bin_counters=None, figsize=(10, 6),
+                             xlabel='Оценка модели', ylabel='Точность', title='Диаграмма калибровки модели'):
+    """
+    График соотношения средней модельной оценки и сренего фактического признака.
+    Подходит для иллюстрации калибровки на небольшом числе бинов.
+
+    Принимает:
+
+    - mean_predicted_bin_score: средняя прогнозная оцнека в бинах
+    - mean_actual_bin_score: средняя фактическая оцнека в бинах
+    - bin_counters: число самплов в каждом из бинов
+    - figsize: размер диаграммы
+    - xlabel: название оси х
+    - ylabel: название оси у
+    - title: заголовок диаграммы
+
+    """
+
+    f, ax = plt.subplots(1, 1, figsize=figsize)
+    bins_sequence = range(len(mean_predicted_bin_score))
+    sns.barplot(x=mean_predicted_bin_score, y=mean_predicted_bin_score, color='blue', label='Уверенность модели')
+
+    for bar in ax.containers[0]:
+        bar.set_alpha(0.3)
+
+    plt.scatter(bins_sequence, mean_predicted_bin_score, color='b')
+    plt.plot([0, len(bins_sequence) - 1], [0, 1], linewidth=2, marker=None)
+    sns.barplot(x=mean_predicted_bin_score, y=mean_actual_bin_score, color='orange', label='Средняя доля класса')
+
+    for bar in ax.containers[1]:
+        bar.set_alpha(0.3)
+
+    if bin_counters is not None:
+        bin_sum = sum(bin_counters)
+        sample_percent_size = [bi / bin_sum for bi in bin_counters]
+        plt.bar(bins_sequence, sample_percent_size, width=.1, color='k', label='% самплов')
+    ax.grid('both', linestyle=':')
+    labels = [item.get_text() for item in ax.get_xticklabels()]
+    ax.set_xticklabels([str(round(float(label), 2)) for label in labels])
+    ax.set_axisbelow(True)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    plt.legend()
