@@ -1399,3 +1399,94 @@ def plot_calibration_diagram(mean_predicted_bin_score, mean_actual_bin_score, bi
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     plt.legend()
+
+
+def cum_gain(y_true, y_prob):
+    ''' Вычисляется кумулятивный Gain
+    	Параметры:
+        	y_true -- флаги истинных ответов,
+        	y_prob -- вероятность полученная от модели
+    '''
+    d = pd.DataFrame(
+        {
+            'y_true': list(y_true),
+            'y_prob': list(y_prob)
+        })
+
+    d.sort_values(inplace=True, by=['y_prob'], ascending=False)
+    d['y_cumsum'] = d.y_true.cumsum()  # накопленная доля единичек от всех единичек
+    d['y_rate'] = np.asarray(d['y_cumsum']) / sum(d['y_true'])  # Gain
+    d['x_rate'] = (np.arange(len(d)) + 1) / len(d)  # доля самых скоровых клиентов, которых берём для подсчёта Gain
+
+    return np.append(0, d['x_rate'].values), np.append(0, d['y_rate'].values)
+
+
+def plot_cum_gain_curve(y_train, y_pred_train, y_test=None, y_pred_test=None, show_flg=False):
+    '''
+    Построение Gain-кривой
+    '''
+
+    fig = plt.figure(figsize=(12, 8))
+    lw = 2
+    supp_train, tpr_train = cum_gain(y_train, y_pred_train)
+    plt.plot(supp_train, tpr_train, color='green', lw=lw, label='Train')
+
+    if y_test is not None:
+        supp_test, tpr_test, best_tpr_test = cum_gain(y_test, y_pred_test)
+        plt.plot(supp_test, tpr_test, color='red', lw=lw, label='Test')
+
+    plt.ylim([0.0, 1.1])
+    plt.xlim([0.0, 1])
+    plt.xlabel('% customers', fontsize=18)
+    plt.ylabel('% customers affinity', fontsize=18)
+    plt.title('Cumulative Gains Curve', fontsize=18)
+    plt.grid(color='gray', linestyle='--', linewidth=0.5)
+    plt.legend(loc="lower right", fontsize=14)
+
+    if show_flg:
+        plt.show()
+
+    return fig
+
+
+def lift_metrics(y_true, y_prob):
+    ''' Вычисляется Lift
+    	Параметры:
+        	y_true -- флаги истиных ответов,
+        	y_prob -- вероятность полученная от модели
+    '''
+
+    percentages, gains = cum_gain(y_true, y_prob)
+    percentages = percentages[1:]
+    gains = gains[1:] / percentages
+
+    return percentages, gains
+
+
+def plot_lift_curve(y_train, y_pred_train, y_test=None, y_pred_test=None, show_flg=False):
+    '''
+    Построение Lift-кривой
+    '''
+
+    fig = plt.figure(figsize=(12, 8))
+    lw = 2
+    percentages_train, gains_train = lift_metrics(y_train, y_pred_train)
+    plt.plot(percentages_train, gains_train, color='green', lw=lw, label='Train')
+
+    if y_test is not None:
+        percentages_test, gains_test = lift_metrics(y_test, y_pred_test)
+        plt.plot(percentages_test, gains_test, color='red', lw=lw, label='Test')
+
+    plt.ylim([0.0, 5])
+    plt.xlim([0.0, 1])
+    plt.plot([0, 1], [1, 1], 'k--', lw=lw, label='Baseline')
+    plt.title('Lift curve', fontsize=18)
+    plt.xlabel('% customers', fontsize=18)
+    plt.ylabel('Lift', fontsize=18)
+    plt.grid(color='gray', linestyle='--', linewidth=0.5)
+    plt.legend(loc="upper right", fontsize=14)
+
+    if show_flg:
+        plt.show()
+
+    return fig
